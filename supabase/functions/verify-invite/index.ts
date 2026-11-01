@@ -8,10 +8,17 @@ Deno.serve(async (request) => {
   try {
     const body = await request.json();
     const name = typeof body.name === "string" ? body.name.trim() : "";
+    const familyInviteToken = typeof body.familyInviteToken === "string" ? body.familyInviteToken : "";
     const phoneLastFour = typeof body.phoneLastFour === "string"
       ? body.phoneLastFour.replace(/\D/g, "")
       : "";
-    if (name.length < 2 || name.length > 120 || phoneLastFour.length !== 4) {
+    if (
+      name.length < 2
+      || name.length > 120
+      || familyInviteToken.length < 32
+      || familyInviteToken.length > 100
+      || phoneLastFour.length !== 4
+    ) {
       return jsonResponse({ error: "invalid_input" }, 400);
     }
 
@@ -36,37 +43,31 @@ Deno.serve(async (request) => {
       return jsonResponse({ error: "too_many_attempts" }, 429);
     }
 
-    const { data: matches, error } = await supabase
+    const { data: invitation, error: inviteLookupError } = await supabase
+      .from("family_invite_links")
+      .select("family_id")
+      .eq("token_hash", await sha256(familyInviteToken))
+      .maybeSingle();
+    if (inviteLookupError) throw inviteLookupError;
+    if (!invitation) return jsonResponse({ error: "invite_not_found" }, 404);
+
+    const { data: guestRows, error } = await supabase
       .from("guests")
-      .select("family_id, guest_families!inner(id, name, phone, rsvp_submitted_at, guests(id, name, is_child, age, confirmed))")
-      .ilike("name", name.replace(/[\\%_]/g, "\\$&"))
+      .select("guest_families!inner(id, name, phone, rsvp_submitted_at, guests(id, name, is_child, age, confirmed))")
+      .eq("family_id", invitation.family_id)
       .limit(100);
 
     if (error) throw error;
-    if (!matches?.length) {
+    const familyRecord = guestRows?.[0]?.guest_families;
+    if (!familyRecord) {
       return jsonResponse({ error: "invite_not_found" }, 404);
     }
-
-    type InviteFamily = {
-      id: string;
-      name: string;
-      phone: string;
-      rsvp_submitted_at: string | null;
-      guests: Array<{ id: string; name: string; is_child: boolean; age: number; confirmed: boolean | null }>;
-    };
-    const matchingFamilies = new Map<string, InviteFamily>();
-    for (const match of matches) {
-      const family = match.guest_families as InviteFamily;
-      const phoneDigits = String(family.phone || "").replace(/\D/g, "");
-      if (phoneDigits.length >= 4 && phoneDigits.slice(-4) === phoneLastFour) {
-        matchingFamilies.set(family.id, family);
-      }
-    }
-    if (matchingFamilies.size !== 1) {
-      return jsonResponse({ error: "invite_not_found" }, 404);
-    }
-    const family = [...matchingFamilies.values()][0];
-    if (!family) {
+    const family = Array.isArray(familyRecord) ? familyRecord[0] : familyRecord;
+    const matchingName = family.guests.some((guest: { name: string }) =>
+      guest.name.trim().localeCompare(name, "pt-BR", { sensitivity: "base" }) === 0
+    );
+    const phoneDigits = String(family.phone || "").replace(/\D/g, "");
+    if (!matchingName || phoneDigits.length < 4 || phoneDigits.slice(-4) !== phoneLastFour) {
       return jsonResponse({ error: "invite_not_found" }, 404);
     }
     if (family.rsvp_submitted_at) {
@@ -74,12 +75,12 @@ Deno.serve(async (request) => {
     }
 
     const rawToken = randomToken();
-    const { error: inviteError } = await supabase.from("guest_rsvp_invites").insert({
+    const { error: inviteCreateError } = await supabase.from("guest_rsvp_invites").insert({
       family_id: family.id,
       token_hash: await sha256(rawToken),
       expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     });
-    if (inviteError) throw inviteError;
+    if (inviteCreateError) throw inviteCreateError;
 
     return jsonResponse({
       inviteToken: rawToken,

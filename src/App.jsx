@@ -5,17 +5,24 @@ import {
   Sparkles, Camera, Phone, Mail, ChevronRight, AlertCircle, 
   Layout, Palette, CheckSquare, Settings, LogOut, ExternalLink,
   ChevronDown, MessageSquare, PieChart, ShieldAlert, Award, Copy,
-  Check, RefreshCw, X, Printer
+  Check, RefreshCw, X, Printer, Link2
 } from 'lucide-react';
 import {
   callAdminFunction,
   callPublicFunction,
+  createFamilyInvite,
+  createWeddingForCurrentUser,
   getAdminSession,
   getCheckInUrlToken,
+  loadFamilyInvite,
+  loadUserWedding,
   invokeCheckIn,
   isSupabaseConfigured,
   loadFamilies,
+  loadWeddingState,
   saveFamilies,
+  saveWeddingState,
+  signUpCouple,
   signInAdmin,
   signOutAdmin
 } from './supabase.js';
@@ -132,6 +139,11 @@ export default function App() {
   const [adminAuthLoading, setAdminAuthLoading] = useState(isSupabaseConfigured);
   const [familiesReady, setFamiliesReady] = useState(false);
   const [familiesError, setFamiliesError] = useState('');
+  const [wedding, setWedding] = useState(null);
+  const [weddingStateReady, setWeddingStateReady] = useState(false);
+  const [weddingSetupError, setWeddingSetupError] = useState('');
+  const familySnapshotRef = useRef([]);
+  const familySaveQueue = useRef(Promise.resolve());
 
   // --- ESTADO GERAL DE CONFIGURAÇÃO DO CASAL ---
   const [coupleData, setCoupleData] = useState({
@@ -372,49 +384,228 @@ export default function App() {
   useEffect(() => {
     if (!isSupabaseConfigured || !adminSession?.access_token) {
       setFamiliesReady(false);
+      setWeddingStateReady(false);
+      setWedding(null);
       return;
     }
 
     let active = true;
     setFamiliesReady(false);
+    setWeddingStateReady(false);
     setFamiliesError('');
-    loadFamilies(adminSession.access_token)
-      .then(remoteFamilies => {
+    const loadCoupleWorkspace = async () => {
+      try {
+        const remoteWedding = await loadUserWedding(adminSession.access_token);
         if (!active) return;
+        if (!remoteWedding) {
+          setWedding(null);
+          setFamilies([]);
+          familySnapshotRef.current = [];
+          setFamiliesReady(true);
+          return;
+        }
+
+        const [remoteState, remoteFamilies] = await Promise.all([
+          loadWeddingState(remoteWedding.id, adminSession.access_token),
+          loadFamilies(remoteWedding.id, adminSession.access_token)
+        ]);
+        if (!active) return;
+        setWedding(remoteWedding);
+        setCoupleData(remoteState.coupleData);
+        setGifts(remoteState.gifts);
+        setGuestMessages(remoteState.guestMessages);
+        setTasks(remoteState.tasks);
+        setFinancials(remoteState.financials);
         setFamilies(remoteFamilies);
+        familySnapshotRef.current = remoteFamilies;
+        setWeddingStateReady(true);
         setFamiliesReady(true);
-      })
-      .catch(error => {
+      } catch (error) {
         if (!active) return;
         setFamiliesError(error.message);
-      });
+        setFamiliesReady(true);
+      }
+    };
+    loadCoupleWorkspace();
 
     return () => { active = false; };
   }, [adminSession?.access_token]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !adminSession?.access_token || !familiesReady) return;
-    saveFamilies(families, adminSession.access_token)
-      .then(() => setFamiliesError(''))
-      .catch(error => setFamiliesError(`Não foi possível salvar as alterações: ${error.message}`));
-  }, [families, familiesReady, adminSession?.access_token]);
+    if (!isSupabaseConfigured || !adminSession?.access_token || !wedding?.id || !familiesReady) return;
+    const snapshot = families.map(family => ({
+      ...family,
+      members: family.members.map(member => ({ ...member }))
+    }));
+    if (JSON.stringify(snapshot) === JSON.stringify(familySnapshotRef.current)) return;
+
+    const timeout = window.setTimeout(() => {
+      const targetWeddingId = wedding.id;
+      const accessToken = adminSession.access_token;
+      const savePromise = familySaveQueue.current.then(() =>
+        saveFamilies(snapshot, targetWeddingId, accessToken, familySnapshotRef.current)
+      );
+      familySaveQueue.current = savePromise.catch(() => {});
+      savePromise
+        .then(() => {
+          if (wedding?.id !== targetWeddingId || adminSession?.access_token !== accessToken) return;
+          familySnapshotRef.current = snapshot;
+          setFamiliesError('');
+        })
+        .catch(error => setFamiliesError(`Não foi possível salvar as alterações: ${error.message}`));
+    }, 350);
+    return () => window.clearTimeout(timeout);
+  }, [families, familiesReady, adminSession?.access_token, wedding?.id]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !adminSession?.access_token || !wedding?.id || !weddingStateReady) return;
+    const timeout = window.setTimeout(() => {
+      saveWeddingState(wedding.id, {
+        coupleData,
+        gifts,
+        tasks,
+        financials
+      }, adminSession.access_token)
+        .then(() => setFamiliesError(''))
+        .catch(error => setFamiliesError(`Não foi possível salvar as configurações: ${error.message}`));
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [coupleData, gifts, tasks, financials, wedding?.id, weddingStateReady, adminSession?.access_token]);
 
   const handleAdminLogin = async (email, password) => {
     const session = await signInAdmin(email, password);
     setAdminSession(session);
     setFamiliesReady(false);
+    setWeddingStateReady(false);
     setFamiliesError('');
+  };
+
+  const handleCoupleSignup = async (email, password) => {
+    const result = await signUpCouple(email, password);
+    if (result.access_token) {
+      setAdminSession(result);
+      setFamiliesReady(false);
+      setWeddingStateReady(false);
+      setFamiliesError('');
+    }
+    return result;
+  };
+
+  const handleCreateWedding = async ({ groom, bride, weddingDate }) => {
+    if (!adminSession?.access_token) throw new Error('Entre na sua conta para configurar o casamento.');
+    const monogram = `${bride.charAt(0).toUpperCase()} ♡ ${groom.charAt(0).toUpperCase()}`;
+    const rsvpDeadline = new Date(`${weddingDate}T12:00:00`);
+    rsvpDeadline.setDate(rsvpDeadline.getDate() - 30);
+    const nextCoupleData = {
+      ...coupleData,
+      groom,
+      bride,
+      monogram,
+      weddingDate: `${weddingDate}T16:00`,
+      locationName: '',
+      address: '',
+      ceremonialist: '',
+      email: adminSession.user.email || '',
+      pixKey: '',
+      story: '',
+      guestLimit: 100,
+      rsvpDeadline: rsvpDeadline.toISOString().slice(0, 10)
+    };
+    const initialState = {
+      coupleData: nextCoupleData,
+      gifts: [],
+      guestMessages: [],
+      tasks: tasks.map(task => ({ ...task, completed: false })),
+      financials: { targetBudget: 0, suppliers: [] }
+    };
+
+    setWeddingSetupError('');
+    const createdWedding = await createWeddingForCurrentUser(
+      `${groom} & ${bride}`,
+      initialState,
+      adminSession.access_token
+    );
+    setWedding(createdWedding);
+    setCoupleData(nextCoupleData);
+    setFamilies([]);
+    familySnapshotRef.current = [];
+    setGifts([]);
+    setGuestMessages([]);
+    setTasks(initialState.tasks);
+    setFinancials(initialState.financials);
+    setFamiliesReady(true);
+    setWeddingStateReady(true);
   };
 
   const handleAdminLogout = () => {
     signOutAdmin();
     setAdminSession(null);
+    setWedding(null);
     setFamilies([]);
+    familySnapshotRef.current = [];
     setFamiliesReady(false);
+    setWeddingStateReady(false);
   };
 
   if (window.location.pathname === '/check-in') {
     return <CheckInPage />;
+  }
+  const inviteMatch = window.location.pathname.match(/^\/convite\/([^/]+)\/?$/);
+  if (inviteMatch) {
+    return <FamilyInvitationPage token={decodeURIComponent(inviteMatch[1])} />;
+  }
+  if (isSupabaseConfigured && adminAuthLoading) {
+    return <PortalMessage message="Verificando sua conta..." />;
+  }
+  if (isSupabaseConfigured && !adminSession) {
+    return <CouplePortalView onLogin={handleAdminLogin} onSignup={handleCoupleSignup} />;
+  }
+  if (isSupabaseConfigured && !familiesReady) {
+    return <PortalMessage message={familiesError || 'Carregando os dados do casamento...'} />;
+  }
+  if (isSupabaseConfigured && adminSession && !wedding) {
+    return (
+      <CoupleSetupView
+        email={adminSession.user.email}
+        error={weddingSetupError}
+        onSubmit={async formData => {
+          try {
+            await handleCreateWedding(formData);
+          } catch (error) {
+            setWeddingSetupError(error.message);
+          }
+        }}
+        onLogout={handleAdminLogout}
+      />
+    );
+  }
+  if (isSupabaseConfigured && adminSession && wedding && weddingStateReady) {
+    return (
+      <div className={`min-h-screen ${activeTheme.bgPrimary} text-slate-800 font-sans`}>
+        <AdminDashboardView
+          coupleData={coupleData}
+          setCoupleData={setCoupleData}
+          activeTheme={activeTheme}
+          families={families}
+          setFamilies={setFamilies}
+          gifts={gifts}
+          setGifts={setGifts}
+          tasks={tasks}
+          setTasks={setTasks}
+          financials={financials}
+          setFinancials={setFinancials}
+          setShowConfetti={setShowConfetti}
+          onLogout={handleAdminLogout}
+          adminEmail={adminSession.user.email}
+          familiesError={familiesError}
+          adminAccessToken={adminSession.access_token}
+          weddingId={wedding.id}
+        />
+      </div>
+    );
+  }
+  if (!isSupabaseConfigured && !import.meta.env.DEV) {
+    return <PortalMessage message="Este site ainda não está conectado ao banco de dados. Entre em contato com os noivos." />;
   }
 
   return (
@@ -480,6 +671,7 @@ export default function App() {
           setGifts={setGifts}
           guestMessages={guestMessages}
           setGuestMessages={setGuestMessages}
+          familyInviteToken=""
         />
       ) : isSupabaseConfigured && adminAuthLoading ? (
         <div className="min-h-[70vh] flex items-center justify-center text-sm text-slate-600">Verificando acesso ao painel...</div>
@@ -717,7 +909,8 @@ function GuestSiteView({
   gifts, 
   setGifts,
   guestMessages,
-  setGuestMessages
+  setGuestMessages,
+  familyInviteToken = ''
 }) {
   const [activeTab, setActiveTab] = useState('inicio');
   const [carouselIndex, setCarouselIndex] = useState(0);
@@ -967,6 +1160,7 @@ function GuestSiteView({
           activeTheme={activeTheme} 
           families={families} 
           setFamilies={setFamilies} 
+          familyInviteToken={familyInviteToken}
         />
       </section>
 
@@ -977,6 +1171,7 @@ function GuestSiteView({
           gifts={gifts} 
           setGifts={setGifts}
           coupleData={coupleData}
+          familyInviteToken={familyInviteToken}
         />
       </section>
 
@@ -986,6 +1181,7 @@ function GuestSiteView({
           activeTheme={activeTheme} 
           guestMessages={guestMessages} 
           setGuestMessages={setGuestMessages} 
+          familyInviteToken={familyInviteToken}
         />
       </section>
 
@@ -998,7 +1194,7 @@ function GuestSiteView({
 }
 
 /* --- COMPONENTE RSVP INTELIGENTE POR FAMÍLIA --- */
-function RsvpSection({ activeTheme, families, setFamilies }) {
+function RsvpSection({ activeTheme, families, setFamilies, familyInviteToken }) {
   const [searchName, setSearchName] = useState('');
   const [pendingFamily, setPendingFamily] = useState(null);
   const [inviteToken, setInviteToken] = useState('');
@@ -1058,7 +1254,8 @@ function RsvpSection({ activeTheme, families, setFamilies }) {
       try {
         const result = await callPublicFunction('verify-invite', {
           name: searchName.trim(),
-          phoneLastFour: verificationCode
+          phoneLastFour: verificationCode,
+          familyInviteToken
         });
         setInviteToken(result.inviteToken);
         setMemberStatuses(Object.fromEntries(
@@ -1439,7 +1636,7 @@ function RsvpSection({ activeTheme, families, setFamilies }) {
 }
 
 /* --- COMPONENTE DE PRESENTES COM PIX E COTAS --- */
-function GiftSection({ activeTheme, gifts, setGifts, coupleData }) {
+function GiftSection({ activeTheme, gifts, setGifts, coupleData, familyInviteToken }) {
   const [selectedGift, setSelectedGift] = useState(null);
   const [quotasToBuy, setQuotasToBuy] = useState(1);
   const [donorName, setDonorName] = useState('');
@@ -1514,6 +1711,8 @@ function GiftSection({ activeTheme, gifts, setGifts, coupleData }) {
       if (isSupabaseConfigured) {
         await callPublicFunction('create-gift-reservation', {
           id: activeReservationId,
+          giftId: selectedGift.id,
+          inviteToken: familyInviteToken,
           guestName: donorName.trim(),
           whatsapp: donorWhatsapp,
           giftTitle: selectedGift.title,
@@ -1793,13 +1992,17 @@ function GiftSection({ activeTheme, gifts, setGifts, coupleData }) {
 }
 
 /* --- MURAL DE RECADOS DOS CONVIDADOS --- */
-function MessageBoard({ activeTheme, guestMessages, setGuestMessages }) {
+function MessageBoard({ activeTheme, guestMessages, setGuestMessages, familyInviteToken }) {
   const [author, setAuthor] = useState('');
   const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleAddMessage = (e) => {
+  const handleAddMessage = async (e) => {
     e.preventDefault();
     if (!author.trim() || !text.trim()) return;
+    setError('');
+    setSubmitting(true);
 
     const newMessage = {
       id: Date.now().toString(),
@@ -1808,9 +2011,22 @@ function MessageBoard({ activeTheme, guestMessages, setGuestMessages }) {
       date: new Date().toLocaleDateString('pt-BR')
     };
 
-    setGuestMessages([newMessage, ...guestMessages]);
-    setAuthor('');
-    setText('');
+    try {
+      if (isSupabaseConfigured) {
+        await callPublicFunction('create-guest-message', {
+          inviteToken: familyInviteToken,
+          name: newMessage.name,
+          text: newMessage.text
+        });
+      }
+      setGuestMessages([newMessage, ...guestMessages]);
+      setAuthor('');
+      setText('');
+    } catch (submitError) {
+      setError(submitError.message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -1848,10 +2064,12 @@ function MessageBoard({ activeTheme, guestMessages, setGuestMessages }) {
           </div>
           <button 
             type="submit"
+            disabled={submitting || (isSupabaseConfigured && !familyInviteToken)}
             className={`w-full ${activeTheme.accent} ${activeTheme.accentHover} text-white py-2 rounded-lg text-xs font-semibold shadow transition flex items-center justify-center gap-1.5`}
           >
-            <Send size={14} /> Publicar Mensagem
+            <Send size={14} /> {submitting ? 'Enviando...' : 'Publicar Mensagem'}
           </button>
+          {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
         </form>
 
         {/* Lista de mensagens publicadas */}
@@ -1937,6 +2155,152 @@ function AdminLoginView({ onLogin }) {
   );
 }
 
+function PortalMessage({ message }) {
+  return (
+    <div className="min-h-screen bg-[#FCF9F2] flex items-center justify-center p-5">
+      <p className="max-w-md rounded-xl border border-slate-200 bg-white p-5 text-center text-sm text-slate-700">{message}</p>
+    </div>
+  );
+}
+
+function CouplePortalView({ onLogin, onSignup }) {
+  const [mode, setMode] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async event => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+    setIsSubmitting(true);
+    try {
+      if (mode === 'signup') {
+        const result = await onSignup(email, password);
+        if (!result.access_token) {
+          setNotice('Conta criada. Confirme seu e-mail e entre para configurar o casamento.');
+        }
+      } else {
+        await onLogin(email, password);
+      }
+    } catch (submitError) {
+      setError(submitError.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FCF9F2] flex items-center justify-center p-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+        <div className="text-center">
+          <Heart className="mx-auto mb-2 text-[#4A5D4E]" size={28} />
+          <h1 className="text-xl font-serif font-bold text-slate-800">{mode === 'signup' ? 'Crie o espaço do casal' : 'Acesso dos noivos'}</h1>
+          <p className="text-xs text-slate-500 mt-1">Cada casal tem seu próprio painel e lista de convidados.</p>
+        </div>
+        <label className="block text-xs font-semibold text-slate-700">
+          E-mail
+          <input type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
+        </label>
+        <label className="block text-xs font-semibold text-slate-700">
+          Senha
+          <input type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} minLength={6} value={password} onChange={event => setPassword(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
+        </label>
+        {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
+        {notice && <p role="status" className="text-xs text-emerald-800">{notice}</p>}
+        <button type="submit" disabled={isSubmitting} className="w-full bg-[#4A5D4E] hover:bg-[#364539] disabled:opacity-60 text-white py-2.5 rounded-lg text-sm font-semibold">
+          {isSubmitting ? 'Aguarde...' : mode === 'signup' ? 'Criar conta' : 'Entrar'}
+        </button>
+        <button type="button" onClick={() => { setMode(mode === 'signup' ? 'login' : 'signup'); setError(''); setNotice(''); }} className="w-full text-xs text-[#4A5D4E] font-semibold">
+          {mode === 'signup' ? 'Já tenho uma conta' : 'Ainda não tenho conta - cadastrar casal'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function CoupleSetupView({ email, error, onSubmit, onLogout }) {
+  const [groom, setGroom] = useState('');
+  const [bride, setBride] = useState('');
+  const [weddingDate, setWeddingDate] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const handleSubmit = async event => {
+    event.preventDefault();
+    setIsSubmitting(true);
+    try {
+      await onSubmit({ groom: groom.trim(), bride: bride.trim(), weddingDate });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FCF9F2] flex items-center justify-center p-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-lg bg-white p-6 md:p-8 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+        <div>
+          <p className="text-xs text-slate-500">{email}</p>
+          <h1 className="text-2xl font-serif font-bold text-slate-800 mt-1">Configure o casamento</h1>
+          <p className="text-sm text-slate-600 mt-1">Depois você poderá completar os dados do evento e adicionar os convidados.</p>
+        </div>
+        <label className="block text-sm font-semibold text-slate-700">Nome do noivo
+          <input value={groom} onChange={event => setGroom(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required maxLength={80} />
+        </label>
+        <label className="block text-sm font-semibold text-slate-700">Nome da noiva
+          <input value={bride} onChange={event => setBride(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required maxLength={80} />
+        </label>
+        <label className="block text-sm font-semibold text-slate-700">Data do casamento
+          <input type="date" value={weddingDate} onChange={event => setWeddingDate(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
+        </label>
+        {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
+        <div className="flex gap-3">
+          <button type="submit" disabled={isSubmitting} className="flex-1 bg-[#4A5D4E] disabled:opacity-60 text-white py-2.5 rounded-lg text-sm font-semibold">{isSubmitting ? 'Criando...' : 'Criar painel do casamento'}</button>
+          <button type="button" onClick={onLogout} className="px-4 border border-slate-300 rounded-lg text-sm text-slate-600">Sair</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function FamilyInvitationPage({ token }) {
+  const [invitation, setInvitation] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    loadFamilyInvite(token)
+      .then(data => { if (active) setInvitation(data); })
+      .catch(() => { if (active) setError('Este link de convite não é válido ou não está mais disponível. Fale com os noivos.'); });
+    return () => { active = false; };
+  }, [token]);
+
+  if (error) return <PortalMessage message={error} />;
+  if (!invitation) return <PortalMessage message="Carregando o convite..." />;
+  const updateInvitationList = key => updater => {
+    setInvitation(current => {
+      if (!current) return current;
+      const currentValue = key === 'families' ? [current.family] : current[key];
+      const nextValue = typeof updater === 'function' ? updater(currentValue) : updater;
+      return key === 'families'
+        ? { ...current, family: nextValue[0] || current.family }
+        : { ...current, [key]: nextValue };
+    });
+  };
+  return (
+    <GuestSiteView
+      coupleData={invitation.coupleData}
+      activeTheme={THEMES[invitation.coupleData.selectedTheme] || THEMES.jardim}
+      families={[invitation.family]}
+      setFamilies={updateInvitationList('families')}
+      gifts={invitation.gifts}
+      setGifts={updateInvitationList('gifts')}
+      guestMessages={invitation.guestMessages}
+      setGuestMessages={updateInvitationList('guestMessages')}
+      familyInviteToken={token}
+    />
+  );
+}
+
 function AdminDashboardView({ 
   coupleData, 
   setCoupleData, 
@@ -1953,7 +2317,8 @@ function AdminDashboardView({
   onLogout,
   adminEmail,
   familiesError,
-  adminAccessToken
+  adminAccessToken,
+  weddingId
 }) {
   const [activeAdminTab, setActiveAdminTab] = useState('inicio');
 
@@ -2064,7 +2429,7 @@ function AdminDashboardView({
           <TasksTab tasks={tasks} setTasks={setTasks} />
         )}
         {activeAdminTab === 'convidados' && (
-          <GuestsTab families={families} setFamilies={setFamilies} coupleData={coupleData} setCoupleData={setCoupleData} adminAccessToken={adminAccessToken} />
+          <GuestsTab families={families} setFamilies={setFamilies} coupleData={coupleData} setCoupleData={setCoupleData} adminAccessToken={adminAccessToken} weddingId={weddingId} />
         )}
         {activeAdminTab === 'presentes' && (
           <GiftsAdminTab gifts={gifts} setGifts={setGifts} />
@@ -2803,9 +3168,11 @@ function TasksTab({ tasks, setTasks }) {
 }
 
 /* --- SUB-ABA: LISTA DE CONVIDADOS & FAMÍLIAS --- */
-function GuestsTab({ families, setFamilies, coupleData, setCoupleData, adminAccessToken }) {
+function GuestsTab({ families, setFamilies, coupleData, setCoupleData, adminAccessToken, weddingId }) {
   const [newFamilyName, setNewFamilyName] = useState('');
   const [newFamilyPhone, setNewFamilyPhone] = useState('');
+  const [familyInviteLinks, setFamilyInviteLinks] = useState({});
+  const [inviteError, setInviteError] = useState('');
   const [qrSendState, setQrSendState] = useState({});
   const [editingMemberId, setEditingMemberId] = useState(null);
   const [editingMemberName, setEditingMemberName] = useState('');
@@ -2827,6 +3194,21 @@ function GuestsTab({ families, setFamilies, coupleData, setCoupleData, adminAcce
   const absentGuests = allMembers.filter(member => member.confirmed === false).length;
   const guestLimit = Number(coupleData.guestLimit ?? 100);
   const remainingSlots = guestLimit - payingGuests.length;
+
+  const handleCreateFamilyInvite = async family => {
+    setInviteError('');
+    try {
+      const { inviteUrl } = await createFamilyInvite(family.id, adminAccessToken);
+      setFamilyInviteLinks(current => ({ ...current, [family.id]: inviteUrl }));
+      try {
+        await navigator.clipboard.writeText(inviteUrl);
+      } catch {
+        setInviteError(`Link gerado para ${family.name}, mas não foi possível copiar automaticamente. Copie o endereço exibido abaixo.`);
+      }
+    } catch (error) {
+      setInviteError(`Não foi possível gerar o link de ${family.name}: ${error.message}`);
+    }
+  };
 
   const handleGeneratePdf = () => {
     const printWindow = window.open('', '_blank');
@@ -3240,6 +3622,16 @@ function GuestsTab({ families, setFamilies, coupleData, setCoupleData, adminAcce
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  {adminAccessToken && (
+                    <button
+                      type="button"
+                      onClick={() => handleCreateFamilyInvite(family)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:text-[#4A5D4E] text-xs font-semibold"
+                      title="Gerar e copiar link exclusivo desta família"
+                    >
+                      <Link2 size={13} /> {familyInviteLinks[family.id] ? 'Novo link' : 'Link do convite'}
+                    </button>
+                  )}
                   <span className="text-xs bg-emerald-100 text-emerald-800 font-bold px-2.5 py-1 rounded-full">
                     {confirmedCount} / {familyGuests.length} convidados confirmados
                   </span>
@@ -3277,6 +3669,10 @@ function GuestsTab({ families, setFamilies, coupleData, setCoupleData, adminAcce
                   </button>
                 </div>
               </div>
+              {familyInviteLinks[family.id] && (
+                <p className="break-all text-[11px] text-slate-500">Link copiado: {familyInviteLinks[family.id]}</p>
+              )}
+              {inviteError && <p role="alert" className="text-xs text-rose-700">{inviteError}</p>}
               {qrSendState[family.id] && (
                 <p role="status" className="text-[11px] text-slate-600">{qrSendState[family.id]}</p>
               )}

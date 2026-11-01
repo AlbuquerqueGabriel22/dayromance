@@ -10,6 +10,8 @@ Deno.serve(async (request) => {
     const id = typeof body.id === "string" ? body.id : "";
     const guestName = typeof body.guestName === "string" ? body.guestName.trim() : "";
     const giftTitle = typeof body.giftTitle === "string" ? body.giftTitle.trim() : "";
+    const giftId = typeof body.giftId === "string" ? body.giftId : "";
+    const inviteToken = typeof body.inviteToken === "string" ? body.inviteToken : "";
     const eventDate = typeof body.eventDate === "string" ? body.eventDate : "";
     const quotas = Number(body.quotas);
     const whatsappInput = typeof body.whatsapp === "string" ? body.whatsapp : "";
@@ -25,6 +27,8 @@ Deno.serve(async (request) => {
 
     if (
       !uuidPattern.test(id)
+      || !giftId
+      || inviteToken.length < 32
       || guestName.length < 2
       || guestName.length > 120
       || giftTitle.length < 1
@@ -51,6 +55,15 @@ Deno.serve(async (request) => {
       configuredEnv("SUPABASE_SERVICE_ROLE_KEY"),
       { auth: { persistSession: false } },
     );
+    const { data: invitation, error: inviteError } = await supabase
+      .from("family_invite_links")
+      .select("guest_families!inner(wedding_id)")
+      .eq("token_hash", await sha256(inviteToken))
+      .maybeSingle();
+    if (inviteError) throw inviteError;
+    if (!invitation) return jsonResponse({ error: "invite_not_found" }, 404);
+    const family = invitation.guest_families as { wedding_id: string };
+
     const { data: canAttempt, error: rateLimitError } = await supabase.rpc(
       "allow_guest_lookup_attempt",
       { p_lookup_key: await sha256(`gift-reservation:${clientIp}`) },
@@ -60,11 +73,13 @@ Deno.serve(async (request) => {
 
     const { error } = await supabase.rpc("create_gift_reservation", {
       p_id: id,
+      p_gift_id: giftId,
       p_guest_name: guestName,
       p_whatsapp: whatsapp,
       p_gift_title: giftTitle,
       p_quotas: quotas,
       p_event_date: eventDate,
+      p_wedding_id: family.wedding_id,
     });
     if (error?.message.includes("gift_reminders_not_enabled")) {
       return jsonResponse({ error: "reminders_not_configured" }, 503);
@@ -74,6 +89,9 @@ Deno.serve(async (request) => {
     }
     if (error?.message.includes("gift_reservation_id_conflict")) {
       return jsonResponse({ error: "reservation_conflict" }, 409);
+    }
+    if (error?.message.includes("gift_not_found") || error?.message.includes("gift_no_quotas_available")) {
+      return jsonResponse({ error: "gift_no_quotas_available" }, 409);
     }
     if (error) throw error;
 

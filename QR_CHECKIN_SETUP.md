@@ -1,33 +1,34 @@
-# Configuração de QR code, check-in e WhatsApp
+# Configuração do DayRomance, QR code, check-in e WhatsApp
 
-O fluxo usa Supabase para armazenar convidados e check-ins, e a API oficial do WhatsApp da Meta para enviar um PDF individual a cada convidado confirmado. O QR contém um token aleatório; o banco guarda somente o hash. O leitor da entrada exige login de administrador.
+O Supabase armazena as contas, casamentos, configurações, convidados, confirmações, presentes, reservas, tarefas, finanças e mensagens. Cada conta administra um casamento isolado. Cada família recebe um link privado para acessar somente o site e o RSVP do casamento associado. O QR contém um token aleatório; o banco guarda somente o hash. O leitor da entrada exige login de administrador.
 
 ## 1. Configurar o Supabase
 
 1. Crie um projeto Supabase e copie a URL e a chave `anon`/publishable para um arquivo local `.env.local`, usando `.env.example` como modelo. Não coloque a chave `service_role` nesse arquivo nem no frontend.
-2. No SQL Editor do Supabase, execute `supabase/migrations/202611010001_guest_qr_checkin.sql`.
-3. Crie uma conta de administrador em **Authentication → Users**.
-4. Autorize essa conta no SQL Editor, substituindo pelo UUID do usuário:
-
-   ```sql
-   insert into public.couple_admins (user_id)
-   values ('UUID_DO_USUARIO');
-   ```
-
-5. Instale e autentique a CLI do Supabase, vincule o projeto e publique as funções:
+2. Vincule a CLI ao projeto e aplique as migrações versionadas:
 
    ```powershell
    npx supabase login
    npx supabase link --project-ref SEU_PROJECT_REF
+   npx supabase db push
+   ```
+
+3. Configure a URL pública do site como secret e publique as funções. As contas dos noivos são criadas pelo portal do site; depois do cadastro, cada casal configura seu espaço e adiciona as famílias no painel.
+
+   ```powershell
+   npx supabase secrets set APP_PUBLIC_URL=https://SEU_SITE_PUBLICO
    npx supabase functions deploy verify-invite
    npx supabase functions deploy submit-rsvp
+   npx supabase functions deploy get-family-invite
+   npx supabase functions deploy create-family-invite
+   npx supabase functions deploy create-guest-message
    npx supabase functions deploy check-in
    npx supabase functions deploy resend-guest-qrs
    npx supabase functions deploy create-gift-reservation
    npx supabase functions deploy send-gift-reminders
    ```
 
-As tabelas de famílias e convidados começam vazias. Entre no painel autenticado e cadastre os grupos e membros.
+No painel, use **Link do convite** na família desejada para gerar e copiar o link exclusivo, no formato `/convite/TOKEN`. Compartilhe esse endereço apenas com a família correspondente. A geração do link exige que `APP_PUBLIC_URL` esteja configurada.
 
 ## 2. Configurar o WhatsApp da Meta
 
@@ -117,7 +118,9 @@ O sistema envia um lembrete por reserva 30 dias antes e outro 15 dias antes. A r
 
 ## 4. Fluxo
 
-- O convidado informa o nome e os quatro últimos dígitos do telefone da família.
+- Os noivos criam a conta no site, configuram o casamento e cadastram famílias, telefone e convidados no painel.
+- Cada família recebe um link exclusivo, que só carrega o casamento e os membros associados àquele convite. Não compartilhe o link publicamente.
+- O convidado informa o nome e os quatro últimos dígitos do telefone da família na área de RSVP do link.
 - A validação limita tentativas por endereço de rede e nome informado (10 a cada 15 minutos).
 - Depois da validação, responde uma única vez. A resposta é bloqueada no banco para impedir reenvio.
 - Para cada pessoa confirmada, a função cria um token QR individual, gera um PDF e envia o documento ao telefone WhatsApp cadastrado para a família.

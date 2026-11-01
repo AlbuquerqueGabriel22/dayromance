@@ -21,8 +21,8 @@ Deno.serve(async (request) => {
     if (userError || !userData.user) return jsonResponse({ error: "unauthorized" }, 401);
 
     const { data: adminMembership, error: membershipError } = await userClient
-      .from("couple_admins")
-      .select("user_id")
+      .from("wedding_members")
+      .select("user_id,wedding_id")
       .eq("user_id", userData.user.id)
       .maybeSingle();
     if (membershipError || !adminMembership) {
@@ -40,6 +40,7 @@ Deno.serve(async (request) => {
     );
     const { data, error } = await supabase.rpc("validate_guest_checkin", {
       p_token_hash: await sha256(token),
+      p_wedding_id: adminMembership.wedding_id,
     });
     if (error) throw error;
 

@@ -6,6 +6,8 @@ Aplicação web para organizar informações e tarefas do casamento, gerenciar c
 
 - **Site dos convidados:** informações do evento, confirmação de presença, lista de presentes e mural de recados.
 - **Painel dos noivos:** gerenciamento de famílias e convidados, limite e contagem de convidados, confirmações, presentes, tarefas e controle financeiro.
+- **Espaços isolados por casal:** cadastro e login dos noivos, com dados persistidos no Supabase e separados por casamento.
+- **Convite por família:** link exclusivo que abre somente o site e as informações do casamento correspondente.
 - **Confirmação de presença:** validação do convite pelo nome e pelos quatro últimos dígitos do telefone cadastrado.
 - **Convites com QR code:** geração e envio de PDFs individuais para convidados confirmados, com check-in separado e autenticado no evento.
 - **Reservas de presentes:** registro do WhatsApp para contato e lembretes programados pelo sistema, quando a integração estiver configurada.
@@ -46,7 +48,7 @@ Aplicação web para organizar informações e tarefas do casamento, gerenciar c
    VITE_SUPABASE_ANON_KEY=SUA_CHAVE_PUBLICA_ANON
    ```
 
-   Se ainda não configurou o Supabase, deixe essas variáveis sem valores. A aplicação abre sem conectar ao backend, mas os recursos que dependem de persistência e serviços externos não estarão ativos.
+   Sem configurar o Supabase, o ambiente de desenvolvimento mostra dados demonstrativos locais. A autenticação, os links exclusivos e a persistência só funcionam com o backend configurado.
 
 5. Inicie o servidor de desenvolvimento:
 
@@ -66,9 +68,11 @@ npm run preview  # serve localmente a versão de produção
 
 ## Supabase, check-in e WhatsApp
 
-As tabelas, políticas de acesso, funções de RSVP/check-in, QR codes e reservas de presentes são documentadas em [QR_CHECKIN_SETUP.md](./QR_CHECKIN_SETUP.md). O guia inclui:
+As tabelas, políticas de acesso, cadastro dos casais, convites por família, funções de RSVP/check-in, QR codes e reservas de presentes são documentadas em [QR_CHECKIN_SETUP.md](./QR_CHECKIN_SETUP.md). O guia inclui:
 
-- Aplicação da migração do banco e autorização dos usuários administradores.
+- Aplicação das migrações na ordem correta.
+- Cadastro pelo portal e criação do espaço de cada casal.
+- Isolamento dos dados por casamento e criação de links familiares.
 - Publicação das Edge Functions.
 - Configuração segura dos segredos da Meta no Supabase.
 - Configuração dos templates e envio de PDFs individuais.

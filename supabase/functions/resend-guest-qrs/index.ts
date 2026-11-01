@@ -21,8 +21,8 @@ Deno.serve(async (request) => {
     const { data: userData, error: userError } = await userClient.auth.getUser();
     if (userError || !userData.user) return jsonResponse({ error: "unauthorized" }, 401);
     const { data: adminMembership, error: membershipError } = await userClient
-      .from("couple_admins")
-      .select("user_id")
+      .from("wedding_members")
+      .select("user_id,wedding_id")
       .eq("user_id", userData.user.id)
       .maybeSingle();
     if (membershipError || !adminMembership) return jsonResponse({ error: "forbidden" }, 403);
@@ -30,6 +30,14 @@ Deno.serve(async (request) => {
     const body = await request.json();
     const familyId = typeof body.familyId === "string" ? body.familyId : "";
     if (!familyId) return jsonResponse({ error: "invalid_input" }, 400);
+    const { data: accessibleFamily, error: accessError } = await userClient
+      .from("guest_families")
+      .select("id")
+      .eq("id", familyId)
+      .eq("wedding_id", adminMembership.wedding_id)
+      .maybeSingle();
+    if (accessError) throw accessError;
+    if (!accessibleFamily) return jsonResponse({ error: "family_not_found" }, 404);
 
     const supabase = createClient(
       url,
