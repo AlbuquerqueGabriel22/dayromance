@@ -1,0 +1,11 @@
+[functions.verify-invite]
+verify_jwt = false
+
+[functions.submit-rsvp]
+verify_jwt = false
+
+[functions.create-gift-reservation]
+verify_jwt = false
+
+[functions.send-gift-reminders]
+verify_jwt = false
