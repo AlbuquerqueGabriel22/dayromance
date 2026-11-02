@@ -2,7 +2,7 @@
 
 O DayRomance agora usa uma API Node.js própria e um banco PostgreSQL. Os dados ficam isolados por conta/casamento; as senhas são armazenadas com hash, as sessões podem ser revogadas e os links familiares e QR codes usam tokens aleatórios cujo hash é salvo no banco.
 
-> **Migração de dados pendente:** o endereço Supabase usado anteriormente não resolveu no DNS, então não foi possível verificar se há dados nem copiá-los. Não apague o projeto ou o banco Supabase até confirmar a migração. Para continuar, será necessário fornecer a URL correta do projeto ou um backup exportado.
+> **Migração de dados pendente:** o endereço Supabase usado anteriormente não resolveu no DNS, então não foi possível verificar se há dados nem copiá-los. Os arquivos antigos de schema e funções continuam no diretório `supabase/` apenas como referência; não são usados pelo backend atual. Não apague o projeto ou o banco Supabase até confirmar a migração. Para continuar, será necessário fornecer a URL correta do projeto ou um backup exportado.
 
 ## 1. Arquitetura e isolamento do PostgreSQL existente
 

@@ -45,7 +45,7 @@ O guia [QR_CHECKIN_SETUP.md](./QR_CHECKIN_SETUP.md) descreve a hospedagem Ubuntu
 
 ## Migração do Supabase
 
-Os dados não foram migrados: a URL anterior não resolvia no DNS e não há um backup disponível neste ambiente. Não apague a origem antes de conferir os dados e concluir a migração. O backend PostgreSQL não importa automaticamente tabelas Supabase existentes.
+Os dados não foram migrados: a URL anterior não resolvia no DNS e não há um backup disponível neste ambiente. Não apague a origem antes de conferir os dados e concluir a migração. O backend PostgreSQL não importa automaticamente tabelas Supabase existentes. Os arquivos de schema e funções Supabase foram mantidos no repositório como referência para mapear a migração; eles não são usados pelo frontend/API novos.
 
 ## Tecnologias
 
