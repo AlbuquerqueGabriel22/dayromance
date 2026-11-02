@@ -1,0 +1,20 @@
+[Unit]
+Description=DayRomance API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=dayromance
+Group=dayromance
+WorkingDirectory=/opt/dayromance
+EnvironmentFile=/opt/dayromance/.env
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

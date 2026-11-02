@@ -17,15 +17,17 @@ import {
   loadFamilyInvite,
   loadUserWedding,
   invokeCheckIn,
-  isSupabaseConfigured,
+  isBackendConfigured,
   loadFamilies,
   loadWeddingState,
   saveFamilies,
   saveWeddingState,
+  requestPasswordReset,
+  updatePasswordWithRecoveryToken,
   signUpCouple,
   signInAdmin,
   signOutAdmin
-} from './supabase.js';
+} from './api.js';
 
 // --- ESTILOS VISUAIS E PALETA DE CORES DA FOTO DE REFERÊNCIA ---
 // Bege Claro (#FCF9F2), Areia (#F4EFE6), Dourado/Bege Médio (#E8DED1)
@@ -48,6 +50,15 @@ const DEFAULT_GUEST_PALETTE = {
   text: '#1E293B',
   muted: '#64748B',
   border: '#E8DED1'
+};
+
+const darkenHexColor = (hex, amount = 0.18) => {
+  const value = Number.parseInt(hex.slice(1), 16);
+  if (!/^#[0-9a-f]{6}$/i.test(hex) || Number.isNaN(value)) return DEFAULT_GUEST_PALETTE.primaryHover;
+  const red = Math.round(((value >> 16) & 255) * (1 - amount));
+  const green = Math.round(((value >> 8) & 255) * (1 - amount));
+  const blue = Math.round((value & 255) * (1 - amount));
+  return `#${[red, green, blue].map(channel => channel.toString(16).padStart(2, '0')).join('')}`;
 };
 
 const DRESS_CODE_OPTIONS = {
@@ -136,7 +147,13 @@ export default function App() {
   // Estado para alternar entre "Guest" (Visão Convidado) e "Admin" (Painel Noivos)
   const [viewMode, setViewMode] = useState('guest'); 
   const [adminSession, setAdminSession] = useState(null);
-  const [adminAuthLoading, setAdminAuthLoading] = useState(isSupabaseConfigured);
+  const [passwordRecoveryToken, setPasswordRecoveryToken] = useState(() => {
+    const recoveryParams = new URLSearchParams(window.location.hash.slice(1));
+    return recoveryParams.get('type') === 'recovery'
+      ? recoveryParams.get('access_token') || ''
+      : '';
+  });
+  const [adminAuthLoading, setAdminAuthLoading] = useState(isBackendConfigured);
   const [familiesReady, setFamiliesReady] = useState(false);
   const [familiesError, setFamiliesError] = useState('');
   const [wedding, setWedding] = useState(null);
@@ -144,6 +161,7 @@ export default function App() {
   const [weddingSetupError, setWeddingSetupError] = useState('');
   const familySnapshotRef = useRef([]);
   const familySaveQueue = useRef(Promise.resolve());
+  const weddingStateSaveQueue = useRef(Promise.resolve());
 
   // --- ESTADO GERAL DE CONFIGURAÇÃO DO CASAL ---
   const [coupleData, setCoupleData] = useState({
@@ -375,14 +393,15 @@ export default function App() {
   }, [coupleData.weddingDate]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
+    if (!isBackendConfigured) return;
     getAdminSession()
       .then(setAdminSession)
+      .catch(error => setFamiliesError(`Não foi possível verificar a sessão: ${error.message}`))
       .finally(() => setAdminAuthLoading(false));
   }, []);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !adminSession?.access_token) {
+    if (!isBackendConfigured || !adminSession?.access_token) {
       setFamiliesReady(false);
       setWeddingStateReady(false);
       setWedding(null);
@@ -432,7 +451,7 @@ export default function App() {
   }, [adminSession?.access_token]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !adminSession?.access_token || !wedding?.id || !familiesReady) return;
+    if (!isBackendConfigured || !adminSession?.access_token || !wedding?.id || !familiesReady) return;
     const snapshot = families.map(family => ({
       ...family,
       members: family.members.map(member => ({ ...member }))
@@ -458,32 +477,40 @@ export default function App() {
   }, [families, familiesReady, adminSession?.access_token, wedding?.id]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !adminSession?.access_token || !wedding?.id || !weddingStateReady) return;
+    if (!isBackendConfigured || !adminSession?.access_token || !wedding?.id || !weddingStateReady) return;
     const timeout = window.setTimeout(() => {
-      saveWeddingState(wedding.id, {
+      const stateSnapshot = {
         coupleData,
         gifts,
+        guestMessages,
         tasks,
         financials
-      }, adminSession.access_token)
+      };
+      const savePromise = weddingStateSaveQueue.current.then(() =>
+        saveWeddingState(wedding.id, stateSnapshot, adminSession.access_token)
+      );
+      weddingStateSaveQueue.current = savePromise.catch(() => {});
+      savePromise
         .then(() => setFamiliesError(''))
         .catch(error => setFamiliesError(`Não foi possível salvar as configurações: ${error.message}`));
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [coupleData, gifts, tasks, financials, wedding?.id, weddingStateReady, adminSession?.access_token]);
+  }, [coupleData, gifts, guestMessages, tasks, financials, wedding?.id, weddingStateReady, adminSession?.access_token]);
 
   const handleAdminLogin = async (email, password) => {
     const session = await signInAdmin(email, password);
     setAdminSession(session);
+    setViewMode('admin');
     setFamiliesReady(false);
     setWeddingStateReady(false);
     setFamiliesError('');
   };
 
-  const handleCoupleSignup = async (email, password) => {
-    const result = await signUpCouple(email, password);
+  const handleCoupleSignup = async (email, password, profile) => {
+    const result = await signUpCouple(email, password, profile);
     if (result.access_token) {
       setAdminSession(result);
+      setViewMode('admin');
       setFamiliesReady(false);
       setWeddingStateReady(false);
       setFamiliesError('');
@@ -491,16 +518,26 @@ export default function App() {
     return result;
   };
 
-  const handleCreateWedding = async ({ groom, bride, weddingDate }) => {
+  const handleCreateWedding = async ({ groom, bride, weddingDate, monogram, primaryColor }) => {
     if (!adminSession?.access_token) throw new Error('Entre na sua conta para configurar o casamento.');
-    const monogram = `${bride.charAt(0).toUpperCase()} ♡ ${groom.charAt(0).toUpperCase()}`;
+    const coupleMonogram = monogram?.trim()
+      || `${bride.charAt(0).toUpperCase()} ♡ ${groom.charAt(0).toUpperCase()}`;
+    const selectedPrimaryColor = /^#[0-9a-f]{6}$/i.test(primaryColor || '')
+      ? primaryColor
+      : DEFAULT_GUEST_PALETTE.primary;
     const rsvpDeadline = new Date(`${weddingDate}T12:00:00`);
     rsvpDeadline.setDate(rsvpDeadline.getDate() - 30);
     const nextCoupleData = {
       ...coupleData,
       groom,
       bride,
-      monogram,
+      monogram: coupleMonogram,
+      guestPalette: {
+        ...DEFAULT_GUEST_PALETTE,
+        ...(coupleData.guestPalette || {}),
+        primary: selectedPrimaryColor,
+        primaryHover: darkenHexColor(selectedPrimaryColor)
+      },
       weddingDate: `${weddingDate}T16:00`,
       locationName: '',
       address: '',
@@ -537,14 +574,72 @@ export default function App() {
     setWeddingStateReady(true);
   };
 
-  const handleAdminLogout = () => {
-    signOutAdmin();
+  const handleAdminLogout = async () => {
+    if (!isBackendConfigured) {
+      setViewMode('guest');
+      return;
+    }
+
+    if (adminSession?.access_token && wedding?.id) {
+      const accessToken = adminSession.access_token;
+      const weddingId = wedding.id;
+      const latestFamilies = families.map(family => ({
+        ...family,
+        members: family.members.map(member => ({ ...member }))
+      }));
+
+      try {
+        await familySaveQueue.current;
+        await saveFamilies(latestFamilies, weddingId, accessToken, familySnapshotRef.current);
+        familySnapshotRef.current = latestFamilies;
+
+        await weddingStateSaveQueue.current;
+        await saveWeddingState(weddingId, {
+          coupleData,
+          gifts,
+          guestMessages,
+          tasks,
+          financials
+        }, accessToken);
+      } catch (error) {
+        const message = `Não foi possível salvar todas as alterações. Você continua conectado; tente sair novamente. (${error.message})`;
+        setFamiliesError(message);
+        throw error;
+      }
+    }
+
+    try {
+      await signOutAdmin();
+    } catch (error) {
+      setFamiliesError(`As alterações foram salvas, mas não foi possível encerrar a sessão no servidor: ${error.message}`);
+      return;
+    }
     setAdminSession(null);
     setWedding(null);
     setFamilies([]);
     familySnapshotRef.current = [];
     setFamiliesReady(false);
     setWeddingStateReady(false);
+    setViewMode('admin');
+    setCoupleData(current => ({
+      ...current,
+      groom: '',
+      bride: '',
+      monogram: '',
+      monogramImage: null,
+      email: '',
+      pixKey: '',
+      story: '',
+      locationName: '',
+      address: '',
+      ceremonialist: '',
+      coverImage: '',
+      guestCarouselImages: []
+    }));
+    setGifts([]);
+    setGuestMessages([]);
+    setTasks([]);
+    setFinancials({ targetBudget: 0, suppliers: [] });
   };
 
   if (window.location.pathname === '/check-in') {
@@ -554,60 +649,6 @@ export default function App() {
   if (inviteMatch) {
     return <FamilyInvitationPage token={decodeURIComponent(inviteMatch[1])} />;
   }
-  if (isSupabaseConfigured && adminAuthLoading) {
-    return <PortalMessage message="Verificando sua conta..." />;
-  }
-  if (isSupabaseConfigured && !adminSession) {
-    return <CouplePortalView onLogin={handleAdminLogin} onSignup={handleCoupleSignup} />;
-  }
-  if (isSupabaseConfigured && !familiesReady) {
-    return <PortalMessage message={familiesError || 'Carregando os dados do casamento...'} />;
-  }
-  if (isSupabaseConfigured && adminSession && !wedding) {
-    return (
-      <CoupleSetupView
-        email={adminSession.user.email}
-        error={weddingSetupError}
-        onSubmit={async formData => {
-          try {
-            await handleCreateWedding(formData);
-          } catch (error) {
-            setWeddingSetupError(error.message);
-          }
-        }}
-        onLogout={handleAdminLogout}
-      />
-    );
-  }
-  if (isSupabaseConfigured && adminSession && wedding && weddingStateReady) {
-    return (
-      <div className={`min-h-screen ${activeTheme.bgPrimary} text-slate-800 font-sans`}>
-        <AdminDashboardView
-          coupleData={coupleData}
-          setCoupleData={setCoupleData}
-          activeTheme={activeTheme}
-          families={families}
-          setFamilies={setFamilies}
-          gifts={gifts}
-          setGifts={setGifts}
-          tasks={tasks}
-          setTasks={setTasks}
-          financials={financials}
-          setFinancials={setFinancials}
-          setShowConfetti={setShowConfetti}
-          onLogout={handleAdminLogout}
-          adminEmail={adminSession.user.email}
-          familiesError={familiesError}
-          adminAccessToken={adminSession.access_token}
-          weddingId={wedding.id}
-        />
-      </div>
-    );
-  }
-  if (!isSupabaseConfigured && !import.meta.env.DEV) {
-    return <PortalMessage message="Este site ainda não está conectado ao banco de dados. Entre em contato com os noivos." />;
-  }
-
   return (
     <div
       className={`wedding-app min-h-screen ${activeTheme.bgPrimary} text-slate-800 transition-colors duration-300 font-sans`}
@@ -661,7 +702,11 @@ export default function App() {
       </header>
 
       {/* --- RENDERIZAÇÃO CONDICIONAL DA VISÃO --- */}
-      {viewMode === 'guest' ? (
+      {viewMode === 'guest' && isBackendConfigured && adminAuthLoading ? (
+        <PortalMessage message="Verificando a conta..." />
+      ) : viewMode === 'guest' && !wedding ? (
+        <PortalMessage message="O site dos convidados é acessado pelo link exclusivo enviado pelos noivos." />
+      ) : viewMode === 'guest' ? (
         <GuestSiteView 
           coupleData={coupleData} 
           activeTheme={activeTheme}
@@ -673,14 +718,39 @@ export default function App() {
           setGuestMessages={setGuestMessages}
           familyInviteToken=""
         />
-      ) : isSupabaseConfigured && adminAuthLoading ? (
+      ) : isBackendConfigured && adminAuthLoading ? (
         <div className="min-h-[70vh] flex items-center justify-center text-sm text-slate-600">Verificando acesso ao painel...</div>
-      ) : isSupabaseConfigured && !adminSession ? (
-        <AdminLoginView onLogin={handleAdminLogin} />
-      ) : isSupabaseConfigured && !familiesReady ? (
+      ) : !isBackendConfigured || !adminSession ? (
+        <CouplePortalView
+          onLogin={handleAdminLogin}
+          onSignup={handleCoupleSignup}
+          onRequestPasswordReset={requestPasswordReset}
+          onUpdatePassword={updatePasswordWithRecoveryToken}
+          recoveryAccessToken={passwordRecoveryToken}
+          isBackendConfigured={isBackendConfigured}
+          onRecoveryComplete={() => {
+            setPasswordRecoveryToken('');
+            window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
+          }}
+        />
+      ) : !familiesReady || (wedding && !weddingStateReady) ? (
         <div className="min-h-[70vh] flex items-center justify-center text-sm text-slate-600">
           {familiesError || 'Carregando convidados...'}
         </div>
+      ) : !wedding ? (
+        <CoupleSetupView
+          email={adminSession.user.email}
+        initialProfile={adminSession.user.user_metadata?.couple_profile || {}}
+        error={weddingSetupError}
+          onSubmit={async formData => {
+            try {
+              await handleCreateWedding(formData);
+            } catch (error) {
+              setWeddingSetupError(error.message);
+            }
+          }}
+          onLogout={handleAdminLogout}
+        />
       ) : (
         <AdminDashboardView 
           coupleData={coupleData}
@@ -695,10 +765,11 @@ export default function App() {
           financials={financials}
           setFinancials={setFinancials}
           setShowConfetti={setShowConfetti}
-          onLogout={isSupabaseConfigured ? handleAdminLogout : undefined}
-          adminEmail={adminSession?.user?.email}
+          onLogout={handleAdminLogout}
+          adminEmail={adminSession?.user?.email || coupleData.email}
           familiesError={familiesError}
           adminAccessToken={adminSession?.access_token}
+          weddingId={wedding.id}
         />
       )}
     </div>
@@ -809,8 +880,8 @@ function CheckInPage() {
     };
   }, [session?.access_token, result, scanCycle]);
 
-  if (!isSupabaseConfigured) {
-    return <CheckInMessage message="O check-in ainda não está configurado. Configure o Supabase antes de usar este leitor." />;
+  if (!isBackendConfigured) {
+    return <CheckInMessage message="O check-in ainda não está configurado. Configure a API do DayRomance antes de usar este leitor." />;
   }
   if (authLoading) return <CheckInMessage message="Verificando acesso ao leitor..." />;
   if (!session) {
@@ -1216,7 +1287,7 @@ function RsvpSection({ activeTheme, families, setFamilies, familyInviteToken }) 
     if (!searchName.trim()) return;
     setLookupError('');
 
-    if (isSupabaseConfigured) {
+    if (isBackendConfigured) {
       setPendingFamily({ id: '', name: searchName.trim(), phone: '', members: [] });
       setVerificationCode('');
       setVerificationError('');
@@ -1250,7 +1321,7 @@ function RsvpSection({ activeTheme, families, setFamilies, familyInviteToken }) 
     e.preventDefault();
     if (!pendingFamily) return;
 
-    if (isSupabaseConfigured) {
+    if (isBackendConfigured) {
       try {
         const result = await callPublicFunction('verify-invite', {
           name: searchName.trim(),
@@ -1335,7 +1406,7 @@ function RsvpSection({ activeTheme, families, setFamilies, familyInviteToken }) 
     setDeliveryWarning('');
     setIsSubmitting(true);
     try {
-      if (isSupabaseConfigured) {
+      if (isBackendConfigured) {
         const result = await callPublicFunction('submit-rsvp', {
           familyId: foundFamily.id,
           inviteToken,
@@ -1603,7 +1674,7 @@ function RsvpSection({ activeTheme, families, setFamilies, familyInviteToken }) 
               : `Agradecemos por nos avisar, ${responsibleName}. Sentiremos sua falta nesse dia tão especial.`
             }
           </p>
-          {hasConfirmedAny && !deliveryWarning && isSupabaseConfigured && (
+          {hasConfirmedAny && !deliveryWarning && isBackendConfigured && (
             <p className="text-slate-600 text-xs">Os QR codes individuais foram enviados ao WhatsApp cadastrado no convite.</p>
           )}
           {deliveryWarning && (
@@ -1708,7 +1779,7 @@ function GiftSection({ activeTheme, gifts, setGifts, coupleData, familyInviteTok
     if (!reservationId) setReservationId(activeReservationId);
 
     try {
-      if (isSupabaseConfigured) {
+      if (isBackendConfigured) {
         await callPublicFunction('create-gift-reservation', {
           id: activeReservationId,
           giftId: selectedGift.id,
@@ -1976,7 +2047,7 @@ function GiftSection({ activeTheme, gifts, setGifts, coupleData, familyInviteTok
                 <CheckCircle size={40} className="text-amber-600 mx-auto" />
                 <h4 className="font-bold text-slate-800">Presente Reservado com Sucesso!</h4>
                 <p className="text-xs text-slate-600">
-                  {isSupabaseConfigured
+                  {isBackendConfigured
                     ? scheduledReminderDays.length
                       ? `Reserva registrada! O sistema enviará automaticamente lembretes pelo WhatsApp informado ${scheduledReminderDays.join(' e ')} dias antes do evento.`
                       : 'Reserva registrada! Os prazos para os lembretes automáticos de 30 e 15 dias antes do evento já passaram.'
@@ -2012,7 +2083,7 @@ function MessageBoard({ activeTheme, guestMessages, setGuestMessages, familyInvi
     };
 
     try {
-      if (isSupabaseConfigured) {
+      if (isBackendConfigured) {
         await callPublicFunction('create-guest-message', {
           inviteToken: familyInviteToken,
           name: newMessage.name,
@@ -2064,7 +2135,7 @@ function MessageBoard({ activeTheme, guestMessages, setGuestMessages, familyInvi
           </div>
           <button 
             type="submit"
-            disabled={submitting || (isSupabaseConfigured && !familyInviteToken)}
+            disabled={submitting || (isBackendConfigured && !familyInviteToken)}
             className={`w-full ${activeTheme.accent} ${activeTheme.accentHover} text-white py-2 rounded-lg text-xs font-semibold shadow transition flex items-center justify-center gap-1.5`}
           >
             <Send size={14} /> {submitting ? 'Enviando...' : 'Publicar Mensagem'}
@@ -2163,10 +2234,26 @@ function PortalMessage({ message }) {
   );
 }
 
-function CouplePortalView({ onLogin, onSignup }) {
-  const [mode, setMode] = useState('login');
+function CouplePortalView({
+  onLogin,
+  onSignup,
+  onRequestPasswordReset,
+  onUpdatePassword,
+  recoveryAccessToken = '',
+  onRecoveryComplete,
+  isBackendConfigured = true
+}) {
+  const [mode, setMode] = useState(recoveryAccessToken ? 'reset' : 'login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [coupleProfile, setCoupleProfile] = useState({
+    groom: '',
+    bride: '',
+    monogram: '',
+    primaryColor: DEFAULT_GUEST_PALETTE.primary
+  });
+  const [monogramCustomized, setMonogramCustomized] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -2177,8 +2264,32 @@ function CouplePortalView({ onLogin, onSignup }) {
     setNotice('');
     setIsSubmitting(true);
     try {
-      if (mode === 'signup') {
-        const result = await onSignup(email, password);
+      if (mode === 'forgot') {
+        await onRequestPasswordReset(email);
+        setMode('login');
+        setNotice('Se houver uma conta com esse e-mail, enviaremos um link para redefinir a senha.');
+      } else if (mode === 'reset') {
+        if (!recoveryAccessToken) throw new Error('O link de recuperação é inválido ou expirou. Solicite outro.');
+        if (password !== confirmPassword) throw new Error('As senhas não coincidem.');
+        await onUpdatePassword(recoveryAccessToken, password);
+        onRecoveryComplete();
+        setMode('login');
+        setPassword('');
+        setConfirmPassword('');
+        setNotice('Senha atualizada. Entre com sua nova senha.');
+      } else if (mode === 'signup') {
+        if (password !== confirmPassword) throw new Error('As senhas não coincidem.');
+        if (!coupleProfile.groom.trim() || !coupleProfile.bride.trim()) {
+          throw new Error('Informe o nome dos dois noivos.');
+        }
+        const profile = {
+          ...coupleProfile,
+          groom: coupleProfile.groom.trim(),
+          bride: coupleProfile.bride.trim(),
+          monogram: coupleProfile.monogram.trim()
+            || `${coupleProfile.bride.trim().charAt(0).toUpperCase()} ♡ ${coupleProfile.groom.trim().charAt(0).toUpperCase()}`
+        };
+        const result = await onSignup(email, password, profile);
         if (!result.access_token) {
           setNotice('Conta criada. Confirme seu e-mail e entre para configurar o casamento.');
         }
@@ -2194,43 +2305,176 @@ function CouplePortalView({ onLogin, onSignup }) {
 
   return (
     <div className="min-h-screen bg-[#FCF9F2] flex items-center justify-center p-4">
-      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-lg bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
         <div className="text-center">
           <Heart className="mx-auto mb-2 text-[#4A5D4E]" size={28} />
-          <h1 className="text-xl font-serif font-bold text-slate-800">{mode === 'signup' ? 'Crie o espaço do casal' : 'Acesso dos noivos'}</h1>
+          <h1 className="text-xl font-serif font-bold text-slate-800">
+            {mode === 'signup' ? 'Crie o espaço do casal'
+              : mode === 'forgot' ? 'Recuperar senha'
+                : mode === 'reset' ? 'Definir nova senha'
+                  : 'Acesso dos noivos'}
+          </h1>
           <p className="text-xs text-slate-500 mt-1">Cada casal tem seu próprio painel e lista de convidados.</p>
         </div>
-        <label className="block text-xs font-semibold text-slate-700">
-          E-mail
-          <input type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
-        </label>
-        <label className="block text-xs font-semibold text-slate-700">
-          Senha
-          <input type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} minLength={6} value={password} onChange={event => setPassword(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
-        </label>
+        {mode === 'signup' && (
+          <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Nome do noivo
+                  <input
+                    type="text"
+                    autoComplete="given-name"
+                    maxLength={80}
+                    value={coupleProfile.groom}
+                    onChange={event => {
+                      const groom = event.target.value;
+                      setCoupleProfile(current => ({
+                        ...current,
+                        groom,
+                        monogram: monogramCustomized
+                          ? current.monogram
+                          : `${current.bride.trim().charAt(0).toUpperCase()} ♡ ${groom.trim().charAt(0).toUpperCase()}`
+                      }));
+                    }}
+                    className="mt-1 w-full px-3 py-2 border rounded-lg text-sm"
+                    required
+                  />
+                </label>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Nome da noiva
+                  <input
+                    type="text"
+                    autoComplete="family-name"
+                    maxLength={80}
+                    value={coupleProfile.bride}
+                    onChange={event => {
+                      const bride = event.target.value;
+                      setCoupleProfile(current => ({
+                        ...current,
+                        bride,
+                        monogram: monogramCustomized
+                          ? current.monogram
+                          : `${bride.trim().charAt(0).toUpperCase()} ♡ ${current.groom.trim().charAt(0).toUpperCase()}`
+                      }));
+                    }}
+                    className="mt-1 w-full px-3 py-2 border rounded-lg text-sm"
+                    required
+                  />
+                </label>
+              </div>
+              <label className="block text-xs font-semibold text-slate-700">
+                Iniciais exibidas no site
+                <input
+                  type="text"
+                  maxLength={24}
+                  placeholder="Ex.: A ♡ R"
+                  value={coupleProfile.monogram}
+                  onChange={event => {
+                    setMonogramCustomized(true);
+                    setCoupleProfile(current => ({ ...current, monogram: event.target.value }));
+                  }}
+                  className="mt-1 w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </label>
+              <label className="flex items-center justify-between gap-3 text-xs font-semibold text-slate-700">
+                Cor predominante do site
+                <input
+                  type="color"
+                  value={coupleProfile.primaryColor}
+                  onChange={event => setCoupleProfile(current => ({ ...current, primaryColor: event.target.value }))}
+                  className="h-10 w-16 cursor-pointer rounded border border-slate-300 bg-white p-1"
+                  aria-label="Escolha a cor predominante do site"
+                />
+              </label>
+          </>
+        )}
+        {mode !== 'reset' && (
+          <label className="block text-xs font-semibold text-slate-700">
+            E-mail
+            <input type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
+          </label>
+        )}
+        {mode !== 'forgot' && (
+          <label className="block text-xs font-semibold text-slate-700">
+            {mode === 'reset' ? 'Nova senha' : 'Senha'}
+            <input
+              type="password"
+              autoComplete={mode === 'signup' || mode === 'reset' ? 'new-password' : 'current-password'}
+              minLength={8}
+              value={password}
+              onChange={event => setPassword(event.target.value)}
+              className="mt-1 w-full px-3 py-2 border rounded-lg text-sm"
+              required
+            />
+          </label>
+        )}
+        {mode === 'signup' && (
+          <label className="block text-xs font-semibold text-slate-700">
+            Confirmar senha
+            <input
+              type="password"
+              autoComplete="new-password"
+              minLength={8}
+              value={confirmPassword}
+              onChange={event => setConfirmPassword(event.target.value)}
+              className="mt-1 w-full px-3 py-2 border rounded-lg text-sm"
+              required
+            />
+          </label>
+        )}
+        {mode === 'reset' && (
+          <label className="block text-xs font-semibold text-slate-700">
+            Confirmar nova senha
+            <input type="password" autoComplete="new-password" minLength={8} value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
+          </label>
+        )}
+        {!isBackendConfigured && <p className="text-xs text-amber-800">Configure a API PostgreSQL do DayRomance para habilitar login, cadastro, recuperação de senha e salvamento dos dados.</p>}
         {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
         {notice && <p role="status" className="text-xs text-emerald-800">{notice}</p>}
-        <button type="submit" disabled={isSubmitting} className="w-full bg-[#4A5D4E] hover:bg-[#364539] disabled:opacity-60 text-white py-2.5 rounded-lg text-sm font-semibold">
-          {isSubmitting ? 'Aguarde...' : mode === 'signup' ? 'Criar conta' : 'Entrar'}
+        <button type="submit" disabled={isSubmitting || !isBackendConfigured} className="w-full bg-[#4A5D4E] hover:bg-[#364539] disabled:opacity-60 text-white py-2.5 rounded-lg text-sm font-semibold">
+          {isSubmitting ? 'Aguarde...'
+            : mode === 'signup' ? 'Criar conta'
+              : mode === 'forgot' ? 'Enviar link de recuperação'
+                : mode === 'reset' ? 'Salvar nova senha'
+                  : 'Entrar'}
         </button>
-        <button type="button" onClick={() => { setMode(mode === 'signup' ? 'login' : 'signup'); setError(''); setNotice(''); }} className="w-full text-xs text-[#4A5D4E] font-semibold">
-          {mode === 'signup' ? 'Já tenho uma conta' : 'Ainda não tenho conta - cadastrar casal'}
-        </button>
+        {mode === 'login' && (
+          <>
+            <button type="button" onClick={() => { setMode('forgot'); setError(''); setNotice(''); }} className="w-full text-xs text-[#4A5D4E] font-semibold">
+              Esqueci minha senha
+            </button>
+            <button type="button" onClick={() => { setMode('signup'); setError(''); setNotice(''); }} className="w-full text-xs text-[#4A5D4E] font-semibold">
+              Ainda não tenho conta - cadastrar casal
+            </button>
+          </>
+        )}
+        {mode === 'signup' && (
+          <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }} className="w-full text-xs text-[#4A5D4E] font-semibold">
+            Já tenho uma conta
+          </button>
+        )}
+        {(mode === 'forgot' || mode === 'reset') && (
+          <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }} className="w-full text-xs text-[#4A5D4E] font-semibold">
+            Voltar para entrar
+          </button>
+        )}
       </form>
     </div>
   );
 }
 
-function CoupleSetupView({ email, error, onSubmit, onLogout }) {
-  const [groom, setGroom] = useState('');
-  const [bride, setBride] = useState('');
+function CoupleSetupView({ email, error, onSubmit, onLogout, initialProfile = {} }) {
+  const [groom, setGroom] = useState(initialProfile.groom || '');
+  const [bride, setBride] = useState(initialProfile.bride || '');
+  const [monogram, setMonogram] = useState(initialProfile.monogram || '');
+  const [primaryColor, setPrimaryColor] = useState(initialProfile.primaryColor || DEFAULT_GUEST_PALETTE.primary);
   const [weddingDate, setWeddingDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const handleSubmit = async event => {
     event.preventDefault();
     setIsSubmitting(true);
     try {
-      await onSubmit({ groom: groom.trim(), bride: bride.trim(), weddingDate });
+      await onSubmit({ groom: groom.trim(), bride: bride.trim(), weddingDate, monogram, primaryColor });
     } finally {
       setIsSubmitting(false);
     }
@@ -2249,6 +2493,13 @@ function CoupleSetupView({ email, error, onSubmit, onLogout }) {
         </label>
         <label className="block text-sm font-semibold text-slate-700">Nome da noiva
           <input value={bride} onChange={event => setBride(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required maxLength={80} />
+        </label>
+        <label className="block text-sm font-semibold text-slate-700">Iniciais exibidas no site
+          <input value={monogram} onChange={event => setMonogram(event.target.value)} placeholder={`${bride.charAt(0).toUpperCase()} ♡ ${groom.charAt(0).toUpperCase()}`} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" maxLength={24} />
+        </label>
+        <label className="flex items-center justify-between gap-3 text-sm font-semibold text-slate-700">
+          Cor predominante do site
+          <input type="color" value={primaryColor} onChange={event => setPrimaryColor(event.target.value)} className="h-10 w-16 cursor-pointer rounded border border-slate-300 bg-white p-1" aria-label="Escolha a cor predominante do site" />
         </label>
         <label className="block text-sm font-semibold text-slate-700">Data do casamento
           <input type="date" value={weddingDate} onChange={event => setWeddingDate(event.target.value)} className="mt-1 w-full px-3 py-2 border rounded-lg text-sm" required />
@@ -2321,6 +2572,7 @@ function AdminDashboardView({
   weddingId
 }) {
   const [activeAdminTab, setActiveAdminTab] = useState('inicio');
+  const [isLogoutMenuOpen, setIsLogoutMenuOpen] = useState(false);
 
   return (
     <div className="flex flex-col md:flex-row min-h-[calc(100vh-45px)] bg-slate-100">
@@ -2395,8 +2647,15 @@ function AdminDashboardView({
           {onLogout ? (
             <>
               Logado como: <br />
-              <strong className="text-slate-300">{adminEmail}</strong>
-              <button onClick={onLogout} className="block mt-3 text-slate-400 hover:text-white">Sair do painel</button>
+              <button
+                type="button"
+                onClick={() => setIsLogoutMenuOpen(isOpen => !isOpen)}
+                aria-expanded={isLogoutMenuOpen}
+                className="text-left font-bold text-slate-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+              >
+                {adminEmail}
+              </button>
+              {isLogoutMenuOpen && <LogoutButton onLogout={onLogout} />}
             </>
           ) : (
             <>Logado como: <br /><strong className="text-slate-300">{coupleData.email}</strong></>
@@ -2444,6 +2703,38 @@ function AdminDashboardView({
           <DressCodeTab coupleData={coupleData} setCoupleData={setCoupleData} />
         )}
       </main>
+    </div>
+  );
+}
+
+function LogoutButton({ onLogout }) {
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleLogout = async () => {
+    setError('');
+    setIsSaving(true);
+    try {
+      await onLogout();
+    } catch {
+      setError('Não foi possível salvar e sair. Suas alterações continuam no painel; tente novamente.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={handleLogout}
+        disabled={isSaving}
+        className="inline-flex items-center gap-2 rounded-md px-2.5 py-2 text-slate-300 hover:bg-slate-800 hover:text-white disabled:opacity-60"
+      >
+        <LogOut size={14} />
+        {isSaving ? 'Salvando e saindo...' : 'Sair da conta'}
+      </button>
+      {error && <p role="alert" className="mt-2 text-[11px] text-rose-300">{error}</p>}
     </div>
   );
 }

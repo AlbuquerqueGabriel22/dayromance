@@ -1,133 +1,177 @@
-# Configuração do DayRomance, QR code, check-in e WhatsApp
+# DayRomance: PostgreSQL e hospedagem
 
-O Supabase armazena as contas, casamentos, configurações, convidados, confirmações, presentes, reservas, tarefas, finanças e mensagens. Cada conta administra um casamento isolado. Cada família recebe um link privado para acessar somente o site e o RSVP do casamento associado. O QR contém um token aleatório; o banco guarda somente o hash. O leitor da entrada exige login de administrador.
+O DayRomance agora usa uma API Node.js própria e um banco PostgreSQL. Os dados ficam isolados por conta/casamento; as senhas são armazenadas com hash, as sessões podem ser revogadas e os links familiares e QR codes usam tokens aleatórios cujo hash é salvo no banco.
 
-## 1. Configurar o Supabase
+> **Migração de dados pendente:** o endereço Supabase usado anteriormente não resolveu no DNS, então não foi possível verificar se há dados nem copiá-los. Não apague o projeto ou o banco Supabase até confirmar a migração. Para continuar, será necessário fornecer a URL correta do projeto ou um backup exportado.
 
-1. Crie um projeto Supabase e copie a URL e a chave `anon`/publishable para um arquivo local `.env.local`, usando `.env.example` como modelo. Não coloque a chave `service_role` nesse arquivo nem no frontend.
-2. Vincule a CLI ao projeto e aplique as migrações versionadas:
+## 1. Arquitetura e isolamento do PostgreSQL existente
 
-   ```powershell
-   npx supabase login
-   npx supabase link --project-ref SEU_PROJECT_REF
-   npx supabase db push
-   ```
+O serviço Node escuta somente em `127.0.0.1:3001`. O Nginx serve o site e encaminha `/api/` para essa porta. O PostgreSQL não deve ser exposto à internet.
 
-3. Configure a URL pública do site como secret e publique as funções. As contas dos noivos são criadas pelo portal do site; depois do cadastro, cada casal configura seu espaço e adiciona as famílias no painel.
+Como o servidor já atende outra aplicação, use um **banco novo** (`dayromance`) e um **usuário novo** (`dayromance_app`). Não execute a migração no banco usado pela aplicação existente e não altere `postgresql.conf`, `pg_hba.conf` ou as credenciais da aplicação atual.
 
-   ```powershell
-   npx supabase secrets set APP_PUBLIC_URL=https://SEU_SITE_PUBLICO
-   npx supabase functions deploy verify-invite
-   npx supabase functions deploy submit-rsvp
-   npx supabase functions deploy get-family-invite
-   npx supabase functions deploy create-family-invite
-   npx supabase functions deploy create-guest-message
-   npx supabase functions deploy check-in
-   npx supabase functions deploy resend-guest-qrs
-   npx supabase functions deploy create-gift-reservation
-   npx supabase functions deploy send-gift-reminders
-   ```
+Antes de escolher a porta, confira se `3001` está livre (`sudo ss -ltnp`). Se já estiver em uso, escolha outra porta livre e atualize `PORT` no `.env` e o destino `127.0.0.1:PORT` no Nginx.
 
-No painel, use **Link do convite** na família desejada para gerar e copiar o link exclusivo, no formato `/convite/TOKEN`. Compartilhe esse endereço apenas com a família correspondente. A geração do link exige que `APP_PUBLIC_URL` esteja configurada.
+Antes de criar os nomes, verifique se já existem:
 
-## 2. Configurar o WhatsApp da Meta
+```bash
+sudo -u postgres psql -c '\du'
+sudo -u postgres psql -c '\l'
+```
 
-1. Configure uma conta WhatsApp Business Platform e um número habilitado para a Cloud API.
-2. Crie e obtenha aprovação de um template em português com **cabeçalho de documento** e um parâmetro de texto no corpo (`{{1}}`) para o nome do convidado. O envio é feito usando o nome e idioma configurados abaixo.
-3. Obtenha autorização/opt-in dos convidados para receber a mensagem pelo WhatsApp.
-4. Configure os segredos nas Edge Functions. Use a versão Graph API ativa para sua conta; nunca adicione esses valores ao código ou a variáveis `VITE_`:
+Se `dayromance` ou `dayromance_app` já existir, pare e escolha nomes exclusivos; não reutilize nem remova objetos existentes. Se estiverem livres, crie apenas os objetos novos:
 
-   ```powershell
-   npx supabase secrets set APP_PUBLIC_URL=https://SEU_SITE_PUBLICO `
-     WHATSAPP_GRAPH_API_VERSION=vXX.X `
-     WHATSAPP_PHONE_NUMBER_ID=SEU_PHONE_NUMBER_ID `
-     WHATSAPP_ACCESS_TOKEN=SEU_TOKEN `
-     WHATSAPP_TEMPLATE_NAME=SEU_TEMPLATE `
-     WHATSAPP_TEMPLATE_LANGUAGE=pt_BR `
-     WHATSAPP_REMINDER_TEMPLATE_NAME=SEU_TEMPLATE_DE_LEMBRETE `
-     GIFT_REMINDER_CRON_SECRET=SUBSTITUA_POR_UM_SEGREDO_ALEATORIO_FORTE
-   ```
+```bash
+sudo -u postgres createuser --pwprompt dayromance_app
+sudo -u postgres createdb --owner=dayromance_app dayromance
+```
 
-`SUPABASE_URL`, `SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY` são usados apenas pelas Edge Functions. Verifique a disponibilidade deles no ambiente das funções; se necessário, configure-os como secrets no projeto. A chave `service_role` deve permanecer exclusivamente no servidor.
+O comando solicitará uma senha sem exibi-la. Use uma senha aleatória, exclusiva para esta aplicação. O servidor Node conecta via loopback, e a senha ficará somente no `.env` com permissão restrita.
 
-O endereço público deve ser HTTPS e apontar para esta aplicação. O leitor da festa usa `/check-in` e a câmera do navegador.
+## 2. Preparar o servidor Linux
 
-## 3. Ativar os lembretes automáticos de reservas
+Requisitos: Ubuntu/Debian, PostgreSQL já em execução, Node.js 20 ou superior, Nginx, DNS apontando para o servidor e acesso administrativo. Primeiro, publique/instale a versão atualizada do código no GitHub ou transfira os arquivos para o servidor. Não publique arquivos `.env`.
 
-1. Crie e obtenha aprovação da Meta para um template de WhatsApp da categoria **Utility**, idioma `pt_BR`, sem cabeçalho, com três variáveis no corpo. Exemplo de texto para submeter:
+Instale as ferramentas necessárias sem reinstalar nem reconfigurar o PostgreSQL:
 
-   ```text
-   Olá, {{1}}! Este é um lembrete da sua reserva de {{2}} para o casamento. Faltam {{3}} dias para o evento. Para combinar o pagamento, responda a esta mensagem.
-   ```
+```bash
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx git
+node --version
+npm --version
+```
 
-   Configure `WHATSAPP_REMINDER_TEMPLATE_NAME` com o nome aprovado. A conta também precisa ter opt-in dos destinatários para mensagens pelo WhatsApp.
+Instale Node.js 20+ caso a versão já disponível seja antiga. Crie um usuário Linux próprio para o processo:
 
-2. Publique `create-gift-reservation` e `send-gift-reminders` após configurar os secrets. As reservas feitas com a automação ativa ficam armazenadas no Supabase, com telefone, presente e data do casamento.
+```bash
+sudo adduser --system --group --home /var/lib/dayromance dayromance
+sudo install -d -o dayromance -g dayromance /opt/dayromance
+```
 
-3. No painel **Database → Extensions** do Supabase, habilite `pg_cron`, `pg_net` e `supabase_vault`, caso ainda não estejam habilitadas.
+Clone o repositório ou copie a versão atual para `/opt/dayromance`. Em seguida, instale os pacotes, crie a configuração privada e aplique o esquema **somente ao banco novo**:
 
-4. No SQL Editor, salve a URL da função e o mesmo segredo configurado em `GIFT_REMINDER_CRON_SECRET` no Vault. Substitua os valores de exemplo:
+```bash
+sudo -u dayromance git clone https://github.com/AlbuquerqueGabriel22/dayromance.git /opt/dayromance
+cd /opt/dayromance
+sudo -u dayromance npm ci
+sudo cp .env.example .env
+sudo nano .env
+sudo chown dayromance:dayromance .env
+sudo chmod 600 .env
+```
 
-   ```sql
-   select vault.create_secret(
-     'https://SEU_PROJECT_REF.supabase.co/functions/v1/send-gift-reminders',
-     'gift_reminder_url'
-   );
-   select vault.create_secret(
-     'SUBSTITUA_PELO_MESMO_SEGREDO_CONFIGURADO_NO_SUPABASE',
-     'gift_reminder_cron_secret'
-   );
-   ```
+Preencha no `.env`:
 
-5. Agende a execução diária às 12:00 UTC (09:00 no horário de Brasília):
+```dotenv
+VITE_API_URL=/api
+PORT=3001
+APP_PUBLIC_URL=https://SEU_DOMINIO
+APP_ORIGIN=https://SEU_DOMINIO
+TRUST_PROXY=true
+DATABASE_URL=postgresql://dayromance_app:SENHA_ALEATORIA@127.0.0.1:5432/dayromance
+DATABASE_NAME=dayromance
+DATABASE_SSL=false
+DATABASE_POOL_SIZE=10
+JWT_SECRET=SEGREDO_ALEATORIO_COM_PELO_MENOS_32_CARACTERES
+```
 
-   ```sql
-   select cron.schedule(
-     'send-gift-reminders-daily',
-     '0 12 * * *',
-     $$
-     select net.http_post(
-       url := (
-         select decrypted_secret
-         from vault.decrypted_secrets
-         where name = 'gift_reminder_url'
-       ),
-       headers := jsonb_build_object(
-         'Content-Type', 'application/json',
-         'Authorization', 'Bearer ' || (
-           select decrypted_secret
-           from vault.decrypted_secrets
-           where name = 'gift_reminder_cron_secret'
-         )
-       ),
-       body := '{}'::jsonb
-     );
-     $$
-   );
-   ```
+Gere o segredo da sessão com `openssl rand -hex 32`. Substitua `SEU_DOMINIO` pelo endereço HTTPS real. Se a senha do banco tiver caracteres especiais, faça o percent-encoding deles na `DATABASE_URL` ou use uma senha hexadecimal aleatória para simplificar. Não use `VITE_` em segredos.
 
-6. Depois de confirmar que o job `send-gift-reminders-daily` está ativo em **Database → Cron Jobs**, habilite os registros de reserva:
+Para recuperar senhas, configure SMTP no mesmo `.env`:
 
-   ```sql
-   update public.gift_reminder_settings
-   set enabled = true
-   where id is true;
-   ```
+```dotenv
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=
+SMTP_PASSWORD=
+MAIL_FROM=
+```
 
-O sistema envia um lembrete por reserva 30 dias antes e outro 15 dias antes. A reserva precisa ser registrada até cada data correspondente para receber aquele lembrete. Falhas são registradas e tentadas novamente nas execuções diárias seguintes; envios registrados como concluídos não são processados novamente. Enquanto `gift_reminder_settings.enabled` estiver desativado, a tela não aceitará uma reserva prometendo lembretes automáticos.
+Sem SMTP, o login funciona, mas recuperação de senha retorna um aviso explícito de que o serviço de e-mail não está configurado.
 
-## 4. Fluxo
+Execute a migração e compile os arquivos estáticos:
 
-- Os noivos criam a conta no site, configuram o casamento e cadastram famílias, telefone e convidados no painel.
-- Cada família recebe um link exclusivo, que só carrega o casamento e os membros associados àquele convite. Não compartilhe o link publicamente.
-- O convidado informa o nome e os quatro últimos dígitos do telefone da família na área de RSVP do link.
-- A validação limita tentativas por endereço de rede e nome informado (10 a cada 15 minutos).
-- Depois da validação, responde uma única vez. A resposta é bloqueada no banco para impedir reenvio.
-- Para cada pessoa confirmada, a função cria um token QR individual, gera um PDF e envia o documento ao telefone WhatsApp cadastrado para a família.
-- Se a entrega falhar, um administrador pode clicar no ícone de envio da família no painel para gerar novos QR codes e reenviar os documentos.
-- O QR só é aceito se a pessoa ainda estiver confirmada. Alterar o status invalida o token e remove o check-in anterior; excluir a pessoa invalida o convite por cascata.
-- Os PDFs ficam em um bucket privado do Supabase. O banco remove o arquivo quando o convidado é excluído ou quando o status/nome muda.
-- Na entrada, a organização acessa `/check-in`, entra com uma conta autorizada e lê o QR. O primeiro scan registra o check-in e mostra o nome; scans seguintes informam que a entrada já foi registrada. QR inválido, ausente ou não confirmado mostra **“Convidado não confirmado”**.
-- Para reservas de presentes, o convidado informa o WhatsApp após escolher “Reservar para pagar depois”. Com a automação habilitada, o Supabase guarda a reserva e envia os lembretes programados pelo template aprovado da Meta.
+```bash
+cd /opt/dayromance
+sudo -u dayromance npm run db:migrate
+sudo -u dayromance npm run build
+```
 
-Se as credenciais ou o template da Meta estiverem ausentes/incorretos, a resposta de RSVP ainda será registrada, mas o PDF poderá não ser entregue; a página informa quando o envio falha.
+A migração cria tabelas com prefixo `dr_` dentro do banco `dayromance`; é idempotente. Confira a API antes de publicar:
+
+```bash
+sudo -u dayromance npm start
+```
+
+Em outro terminal, teste `curl http://127.0.0.1:3001/api/health`. Depois interrompa o processo manual com `Ctrl+C`; o systemd será responsável por mantê-lo ativo.
+
+## 3. Ativar o serviço e o domínio
+
+Instale o serviço de API, o timer de lembretes e o site Nginx de exemplo:
+
+```bash
+sudo cp /opt/dayromance/deploy/dayromance.service /etc/systemd/system/
+sudo cp /opt/dayromance/deploy/dayromance-reminders.service /etc/systemd/system/
+sudo cp /opt/dayromance/deploy/dayromance-reminders.timer /etc/systemd/system/
+sudo cp /opt/dayromance/deploy/dayromance.nginx.conf.example /etc/nginx/sites-available/dayromance
+sudo nano /etc/nginx/sites-available/dayromance
+```
+
+No arquivo Nginx, substitua `SEU_DOMINIO`. Ative o site e o serviço:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/dayromance /etc/nginx/sites-enabled/dayromance
+sudo nginx -t
+sudo systemctl daemon-reload
+sudo systemctl enable --now dayromance.service
+sudo systemctl enable --now dayromance-reminders.timer
+sudo systemctl reload nginx
+sudo systemctl status dayromance.service
+```
+
+Emita o certificado HTTPS depois que o DNS já apontar para o servidor:
+
+```bash
+sudo certbot --nginx -d SEU_DOMINIO
+```
+
+O painel do firewall/roteador deve expor somente HTTP/HTTPS (80 e 443). Mantenha PostgreSQL (5432) e a API Node (3001) inacessíveis externamente. Em servidor atrás de roteador, encaminhe apenas as portas web e configure o DNS público.
+
+Após atualizar o código no futuro, repita `npm ci`, `npm run db:migrate`, `npm run build` e `sudo systemctl restart dayromance.service`. O timer de lembretes roda diariamente às 12:00 UTC (09:00 em Brasília).
+
+## 4. WhatsApp, QR code e reservas
+
+Sem credenciais WhatsApp, RSVP e check-in continuam sendo registrados, mas o envio do PDF QR retorna como não entregue; o painel informa que é necessário reenviar depois da configuração. Para habilitar entrega, configure no `.env`:
+
+```dotenv
+WHATSAPP_GRAPH_API_VERSION=vXX.X
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_ACCESS_TOKEN=
+WHATSAPP_TEMPLATE_NAME=
+WHATSAPP_TEMPLATE_LANGUAGE=pt_BR
+WHATSAPP_REMINDER_TEMPLATE_NAME=
+```
+
+Na Meta, aprove:
+
+- Um template com cabeçalho de **documento** e uma variável de texto no corpo (nome do convidado) para o PDF QR.
+- Um template de categoria Utility com três parâmetros no corpo, na ordem: nome do convidado, presente reservado e dias até o casamento.
+
+Obtenha o opt-in dos destinatários e use um token com permissões mínimas necessárias. O envio dos lembretes depende de `WHATSAPP_REMINDER_TEMPLATE_NAME` e das credenciais da Cloud API. O timer registra erros e tenta novamente nas execuções seguintes, sem reenviar mensagens marcadas como concluídas.
+
+Os lembretes são agendados para 30 e 15 dias antes, somente se a reserva ocorrer antes da respectiva data. O link QR é individual; o check-in exige login de um dos noivos e só é aceito para um convidado confirmado.
+
+## 5. Backup e atualizações
+
+Faça backups regulares do banco isolado e armazene-os fora do servidor. Exemplo de backup manual:
+
+```bash
+sudo -u postgres pg_dump --format=custom --file=/caminho-seguro/dayromance-$(date +%F).dump dayromance
+```
+
+Proteja também o `.env`, que contém credenciais. Faça um teste de restauração em um banco separado antes de depender de qualquer backup.
+
+## 6. Dados antigos do Supabase
+
+O backend novo ainda não importou os dados do Supabase. A URL informada anteriormente não era resolvida pelo DNS e não há um dump acessível neste ambiente. Para migrar sem perder informações, confirme primeiro a URL correta do projeto ou exporte um backup; então será possível mapear casais, convidados, convites, presentes, tarefas e finanças para o novo esquema. Não desative o projeto de origem antes dessa conferência.

@@ -1,0 +1,16 @@
+[Unit]
+Description=Send due DayRomance gift reminders
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dayromance
+Group=dayromance
+WorkingDirectory=/opt/dayromance
+EnvironmentFile=/opt/dayromance/.env
+ExecStart=/usr/bin/node server/send-gift-reminders.js
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

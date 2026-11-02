@@ -1,91 +1,58 @@
 # DayRomance
 
-Aplicação web para organizar informações e tarefas do casamento, gerenciar convidados e compartilhar a confirmação de presença, a lista de presentes e outros detalhes do evento.
+Aplicação web para organizar casamentos, convidados, confirmações de presença, presentes, tarefas e orçamento. Cada casal tem login e dados separados; convidados usam links privados de família.
 
 ## Funcionalidades
 
-- **Site dos convidados:** informações do evento, confirmação de presença, lista de presentes e mural de recados.
-- **Painel dos noivos:** gerenciamento de famílias e convidados, limite e contagem de convidados, confirmações, presentes, tarefas e controle financeiro.
-- **Espaços isolados por casal:** cadastro e login dos noivos, com dados persistidos no Supabase e separados por casamento.
-- **Convite por família:** link exclusivo que abre somente o site e as informações do casamento correspondente.
-- **Confirmação de presença:** validação do convite pelo nome e pelos quatro últimos dígitos do telefone cadastrado.
-- **Convites com QR code:** geração e envio de PDFs individuais para convidados confirmados, com check-in separado e autenticado no evento.
-- **Reservas de presentes:** registro do WhatsApp para contato e lembretes programados pelo sistema, quando a integração estiver configurada.
-- **Supabase e WhatsApp:** persistência de dados, autenticação do painel, funções de backend e integração com a API oficial do WhatsApp Business Platform.
-
-> **Atenção:** as integrações com Supabase e WhatsApp não ficam ativas apenas por clonar o repositório. É necessário criar e configurar os serviços, aplicar a migração e publicar as funções. Consulte [QR_CHECKIN_SETUP.md](./QR_CHECKIN_SETUP.md).
-
-## Requisitos
-
-- Node.js e npm.
-- Para as integrações: projeto Supabase, CLI do Supabase, conta WhatsApp Business Platform da Meta e templates aprovados.
+- Cadastro/login dos noivos, recuperação de senha por e-mail e sessão revogável.
+- Configurações do casamento, lista de convidados, RSVP e dados persistidos no PostgreSQL.
+- Link exclusivo por família, confirmação protegida por nome e quatro últimos dígitos do telefone.
+- QR code individual, PDF de entrada e check-in autenticado.
+- Presentes, reservas e lembretes programados para 30 e 15 dias antes do evento.
+- API Node.js separada do frontend React/Vite.
 
 ## Executar localmente
 
-1. Clone o repositório e entre na pasta:
+Requisitos: Node.js 20+, npm e PostgreSQL. O backend usa uma base própria; não use o banco de outra aplicação.
 
-   ```powershell
-   git clone https://github.com/AlbuquerqueGabriel22/dayromance.git
-   cd dayromance
+1. Instale as dependências e configure as variáveis:
+
+   ```bash
+   npm ci
+   cp .env.example .env
    ```
 
-2. Instale as dependências:
+2. No `.env`, configure `DATABASE_URL` para um banco PostgreSQL exclusivo, gere um `JWT_SECRET` com `openssl rand -hex 32` e deixe `VITE_API_URL=/api`. SMTP é necessário para recuperação de senha; as credenciais de WhatsApp são opcionais.
 
-   ```powershell
-   npm install
+3. Crie o esquema e inicie a API:
+
+   ```bash
+   npm run db:migrate
+   npm start
    ```
 
-3. Crie `.env.local` a partir do exemplo:
+4. Em outro terminal, inicie o frontend:
 
-   ```powershell
-   Copy-Item .env.example .env.local
-   ```
-
-4. Para usar o Supabase, preencha em `.env.local`:
-
-   ```dotenv
-   VITE_SUPABASE_URL=https://SEU_PROJECT_REF.supabase.co
-   VITE_SUPABASE_ANON_KEY=SUA_CHAVE_PUBLICA_ANON
-   ```
-
-   Sem configurar o Supabase, o ambiente de desenvolvimento mostra dados demonstrativos locais. A autenticação, os links exclusivos e a persistência só funcionam com o backend configurado.
-
-5. Inicie o servidor de desenvolvimento:
-
-   ```powershell
+   ```bash
    npm run dev
    ```
 
-   O Vite exibirá o endereço local no terminal.
+   A configuração do Vite encaminha `/api` para `http://127.0.0.1:3001`. A API pode ser verificada em `http://127.0.0.1:3001/api/health`.
 
-## Comandos
+## Produção
 
-```powershell
-npm run dev      # inicia o servidor local
-npm run build    # gera a versão de produção em dist/
-npm run preview  # serve localmente a versão de produção
-```
+O guia [QR_CHECKIN_SETUP.md](./QR_CHECKIN_SETUP.md) descreve a hospedagem Ubuntu/Debian, banco PostgreSQL isolado, SMTP, Nginx/HTTPS, systemd, integração WhatsApp, lembretes e backups. Há modelos de serviço em `deploy/`.
 
-## Supabase, check-in e WhatsApp
+## Migração do Supabase
 
-As tabelas, políticas de acesso, cadastro dos casais, convites por família, funções de RSVP/check-in, QR codes e reservas de presentes são documentadas em [QR_CHECKIN_SETUP.md](./QR_CHECKIN_SETUP.md). O guia inclui:
-
-- Aplicação das migrações na ordem correta.
-- Cadastro pelo portal e criação do espaço de cada casal.
-- Isolamento dos dados por casamento e criação de links familiares.
-- Publicação das Edge Functions.
-- Configuração segura dos segredos da Meta no Supabase.
-- Configuração dos templates e envio de PDFs individuais.
-- Agendamento dos lembretes automáticos de reservas 30 e 15 dias antes do evento.
-
-Nunca coloque a chave `service_role`, o token do WhatsApp ou outros segredos em variáveis `VITE_`, no código do frontend ou em arquivos versionados. O arquivo `.env.example` contém apenas nomes e valores de exemplo; use `.env.local` para as configurações locais.
+Os dados não foram migrados: a URL anterior não resolvia no DNS e não há um backup disponível neste ambiente. Não apague a origem antes de conferir os dados e concluir a migração. O backend PostgreSQL não importa automaticamente tabelas Supabase existentes.
 
 ## Tecnologias
 
-- React e Vite
-- Tailwind CSS
-- Supabase Auth, PostgreSQL, Storage e Edge Functions
-- WhatsApp Business Platform Cloud API
+- React, Vite e Tailwind CSS.
+- Node.js, Express e PostgreSQL.
+- bcryptjs para hashes de senha; JWT com sessões revogáveis.
+- WhatsApp Business Platform Cloud API e SMTP, quando configurados.
 
 ## Licença
 
